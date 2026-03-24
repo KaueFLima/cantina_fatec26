@@ -5,7 +5,7 @@ Pré Requisitos:
 Python
 Faker (Biblioteca Python)
 
-Para rodar o aplicativo, rode o app.python em seu ambiente de desenvolvimento preferido, a cantina funciona via terminal.
+Para rodar o aplicativo, clone o repositório e execute o arquivo "app.py"
 
 
 Funcionalidade:
