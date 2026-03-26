@@ -4,15 +4,93 @@ estoque.py — Gerenciamento de Estoque
 Controla os lotes de produtos da cantina usando a Fila FIFO definida
 em models.py, garantindo que o primeiro lote a entrar seja o primeiro
 a ser consumido (política de perecíveis).
+
+Também mantém um histórico de compras (ListaEncadeada) para alimentar
+o relatório financeiro consolidado.
 """
 
-from datetime import date
-from models import Fila
+from datetime import date, datetime
+from models import Fila, ListaEncadeada
 
+
+# ---------------------------------------------------------------------------
+# Registro de Compra — histórico de entradas de estoque
+# ---------------------------------------------------------------------------
+
+class RegistroCompra:
+    """
+    Representa uma entrada de lote no estoque (ato de compra/reposição).
+    Inserido na ListaEncadeada de histórico a cada chamada de adicionar_lote.
+
+    Atributos privados:
+        __nome         : nome do produto comprado
+        __preco_compra : preço unitário de custo (R$)
+        __preco_venda  : preço unitário de venda definido no momento da compra (R$)
+        __validade     : data de validade do lote adquirido
+        __quantidade   : unidades adquiridas neste lote
+        __valor_total  : custo total da compra (preco_compra × quantidade)
+        __data_hora    : timestamp do registro (string formatada)
+    """
+
+    def __init__(
+        self,
+        nome: str,
+        preco_compra: float,
+        preco_venda: float,
+        validade: date,
+        quantidade: int,
+    ):
+        self.__nome         = nome
+        self.__preco_compra = preco_compra
+        self.__preco_venda  = preco_venda
+        self.__validade     = validade
+        self.__quantidade   = quantidade
+        self.__valor_total  = round(preco_compra * quantidade, 2)
+        self.__data_hora    = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    @property
+    def nome(self) -> str:
+        return self.__nome
+
+    @property
+    def preco_compra(self) -> float:
+        return self.__preco_compra
+
+    @property
+    def preco_venda(self) -> float:
+        return self.__preco_venda
+
+    @property
+    def validade(self) -> date:
+        return self.__validade
+
+    @property
+    def quantidade(self) -> int:
+        return self.__quantidade
+
+    @property
+    def valor_total(self) -> float:
+        return self.__valor_total
+
+    @property
+    def data_hora(self) -> str:
+        return self.__data_hora
+
+    def __repr__(self) -> str:
+        return (
+            f"RegistroCompra(nome='{self.__nome}', qtd={self.__quantidade}, "
+            f"total=R${self.__valor_total:.2f})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Lote de Produto — nodo da Fila de Estoque
+# ---------------------------------------------------------------------------
 
 class LoteProduto:
     """
     Representa um lote específico de um produto no estoque.
+    Cada lote tem sua própria data de validade e quantidade independentes.
 
     Atributos privados:
         __nome         : nome do produto
@@ -35,13 +113,11 @@ class LoteProduto:
         if preco_compra < 0 or preco_venda < 0:
             raise ValueError("Os preços não podem ser negativos.")
 
-        self.__nome = nome.strip().title()
+        self.__nome         = nome.strip().title()
         self.__preco_compra = preco_compra
-        self.__preco_venda = preco_venda
-        self.__validade = validade
-        self.__quantidade = quantidade
-
-    # ---- Propriedades (somente leitura, exceto quantidade) ----
+        self.__preco_venda  = preco_venda
+        self.__validade     = validade
+        self.__quantidade   = quantidade
 
     @property
     def nome(self) -> str:
@@ -69,25 +145,13 @@ class LoteProduto:
             raise ValueError("A quantidade não pode ser negativa.")
         self.__quantidade = novo_valor
 
-    # ---- Verificação de validade ----
-
     def esta_vencido(self) -> bool:
         """Retorna True se o lote já passou da data de validade."""
         return date.today() > self.__validade
 
     def dias_para_vencer(self) -> int:
-        """Retorna o número de dias restantes até o vencimento (negativo = vencido)."""
+        """Retorna os dias restantes até o vencimento (negativo = vencido)."""
         return (self.__validade - date.today()).days
-
-    def __str__(self) -> str:
-        alerta = " ⚠️ VENCIDO" if self.esta_vencido() else ""
-        return (
-            f"Produto: {self.__nome:<20} | "
-            f"Compra: R${self.__preco_compra:>7.2f} | "
-            f"Venda: R${self.__preco_venda:>7.2f} | "
-            f"Validade: {self.__validade.strftime('%d/%m/%Y')} | "
-            f"Qtd: {self.__quantidade:>4}{alerta}"
-        )
 
     def __repr__(self) -> str:
         return (
@@ -102,25 +166,33 @@ class LoteProduto:
 
 class GerenciadorEstoque:
     """
-    Gerencia o estoque da cantina por meio de uma Fila FIFO encadeada.
-    Cada nodo da fila representa um lote de produto.
+    Gerencia o estoque da cantina por meio de:
+      - __fila_estoque      : Fila FIFO de LoteProduto (inventário ativo)
+      - __historico_compras : ListaEncadeada de RegistroCompra (auditoria)
 
-    O produto mais antigo (inserido primeiro) sempre será vendido primeiro,
-    respeitando a regra de perecíveis.
+    O produto mais antigo é sempre vendido primeiro (FIFO de perecíveis).
+    Cada adição de lote gera um RegistroCompra para o relatório financeiro.
     """
 
     def __init__(self):
-        self.__fila_estoque: Fila = Fila()
+        self.__fila_estoque:      Fila           = Fila()
+        self.__historico_compras: ListaEncadeada = ListaEncadeada()
 
-    # ---- Acesso interno à estrutura (para persistência) ----
+    # ---- Acesso às estruturas internas (para persistência) ----
 
     def get_fila(self) -> Fila:
-        """Retorna a fila interna (usado pelo módulo de persistência)."""
         return self.__fila_estoque
 
     def set_fila(self, fila: Fila) -> None:
-        """Substitui a fila interna (usado ao carregar dados do Pickle)."""
         self.__fila_estoque = fila
+
+    def get_historico_compras(self) -> ListaEncadeada:
+        """Retorna o histórico de compras (uso do relatório financeiro)."""
+        return self.__historico_compras
+
+    def set_historico_compras(self, historico: ListaEncadeada) -> None:
+        """Substitui o histórico de compras (uso ao carregar dados do Pickle)."""
+        self.__historico_compras = historico
 
     # ---- Operações de estoque ----
 
@@ -133,20 +205,23 @@ class GerenciadorEstoque:
         quantidade: int,
     ) -> None:
         """
-        Cria um novo LoteProduto e o enfileira no estoque.
-
-        Parâmetros:
-            nome         : nome do produto.
-            preco_compra : preço de custo (R$).
-            preco_venda  : preço de venda ao cliente (R$).
-            validade     : objeto datetime.date com a data de validade.
-            quantidade   : número de unidades do lote.
+        Cria um LoteProduto, enfileira no estoque e registra a compra no histórico.
+        A data de validade é informada individualmente para cada lote adicionado.
         """
         try:
             lote = LoteProduto(nome, preco_compra, preco_venda, validade, quantidade)
             self.__fila_estoque.enfileirar(lote)
-            print(f"\n  ✅ Lote de '{lote.nome}' adicionado ao estoque "
-                  f"({quantidade} unidade(s), vence em {lote.dias_para_vencer()} dia(s)).")
+
+            # Registra a entrada no histórico de compras para o relatório financeiro
+            compra = RegistroCompra(
+                lote.nome, preco_compra, preco_venda, validade, quantidade
+            )
+            self.__historico_compras.inserir(compra)
+
+            print(
+                f"\n  ✅ Lote de '{lote.nome}' adicionado ao estoque "
+                f"({quantidade} unidade(s), vence em {lote.dias_para_vencer()} dia(s))."
+            )
         except ValueError as erro:
             print(f"\n  ❌ Erro ao adicionar lote: {erro}")
 
@@ -157,44 +232,39 @@ class GerenciadorEstoque:
           2. Decrementa a quantidade vendida.
           3. Se o lote zerar, remove o nodo da fila.
 
-        Parâmetros:
-            nome             : nome do produto a ser vendido.
-            quantidade_venda : quantidade a ser retirada do estoque.
-
-        Retorna:
-            O valor total da venda (R$), ou None em caso de falha.
+        Retorna o valor total da venda (R$), ou None em caso de falha.
         """
         nome_normalizado = nome.strip().title()
-
-        # Busca o lote mais antigo do produto (FIFO)
-        lote = self.__fila_estoque.buscar(
-            lambda l: l.nome == nome_normalizado
-        )
+        lote = self.__fila_estoque.buscar(lambda l: l.nome == nome_normalizado)
 
         if lote is None:
             print(f"\n  ❌ Produto '{nome_normalizado}' não encontrado no estoque.")
             return None
 
         if lote.esta_vencido():
-            print(f"\n  ⚠️  Atenção: o lote de '{nome_normalizado}' está VENCIDO "
-                  f"({lote.validade.strftime('%d/%m/%Y')}). Venda bloqueada.")
+            print(
+                f"\n  ⚠️  Atenção: o lote de '{nome_normalizado}' está VENCIDO "
+                f"({lote.validade.strftime('%d/%m/%Y')}). Venda bloqueada."
+            )
             return None
 
         if lote.quantidade < quantidade_venda:
             print(
                 f"\n  ❌ Estoque insuficiente para '{nome_normalizado}'. "
-                f"Disponível: {lote.quantidade} unidade(s)."
+                f"Disponível: {lote.quantidade} unidade(s) neste lote."
             )
             return None
 
-        # Efetua o abatimento de estoque
         lote.quantidade -= quantidade_venda
         valor_total = lote.preco_venda * quantidade_venda
 
-        print(f"\n  🛒 Venda realizada: {quantidade_venda}x '{nome_normalizado}' "
-              f"— Total: R${valor_total:.2f}")
+        print(
+            f"\n  🛒 Venda realizada: {quantidade_venda}x '{nome_normalizado}' "
+            f"— Total: R${valor_total:.2f}"
+        )
 
-        # Se o lote esgotou, remove da fila
+        # Lote esgotado: remove da fila usando identidade de objeto (l is lote)
+        # para evitar ambiguidade entre lotes homônimos com mesma quantidade
         if lote.quantidade == 0:
             self.__fila_estoque.remover(lambda l: l is lote)
             print(f"  🔄 Lote de '{nome_normalizado}' esgotado e removido da fila.")
@@ -203,47 +273,37 @@ class GerenciadorEstoque:
 
     def editar_quantidade(self, nome: str, nova_quantidade: int) -> None:
         """
-        Atualiza manualmente a quantidade do primeiro lote encontrado para
-        o produto informado, percorrendo a estrutura encadeada.
-
-        Parâmetros:
-            nome            : nome do produto.
-            nova_quantidade : nova quantidade a ser atribuída.
+        Atualiza manualmente a quantidade do lote mais antigo do produto,
+        percorrendo a estrutura encadeada.
         """
         nome_normalizado = nome.strip().title()
-        lote = self.__fila_estoque.buscar(
-            lambda l: l.nome == nome_normalizado
-        )
+        lote = self.__fila_estoque.buscar(lambda l: l.nome == nome_normalizado)
 
         if lote is None:
             print(f"\n  ❌ Produto '{nome_normalizado}' não encontrado no estoque.")
             return
 
         try:
-            quantidade_anterior = lote.quantidade
+            anterior = lote.quantidade
             lote.quantidade = nova_quantidade
             print(
                 f"\n  ✅ Quantidade de '{nome_normalizado}' atualizada: "
-                f"{quantidade_anterior} → {nova_quantidade}."
+                f"{anterior} → {nova_quantidade}."
             )
         except ValueError as erro:
             print(f"\n  ❌ Erro ao editar: {erro}")
 
     def remover_vencidos(self) -> int:
-        """
-        Percorre toda a fila e remove os lotes vencidos.
-
-        Retorna:
-            Número de lotes removidos.
-        """
+        """Percorre toda a fila e remove os lotes vencidos."""
         removidos = 0
-        # Coleta os lotes vencidos primeiro (não altera a fila durante a iteração)
         lotes_vencidos = [l for l in self.__fila_estoque.listar() if l.esta_vencido()]
 
         for lote in lotes_vencidos:
             self.__fila_estoque.remover(lambda l, ref=lote: l is ref)
-            print(f"  🗑️  Lote vencido removido: {lote.nome} "
-                  f"(venceu em {lote.validade.strftime('%d/%m/%Y')})")
+            print(
+                f"  🗑️  Lote vencido removido: {lote.nome} "
+                f"(venceu em {lote.validade.strftime('%d/%m/%Y')})"
+            )
             removidos += 1
 
         if removidos == 0:
@@ -255,7 +315,8 @@ class GerenciadorEstoque:
 
     def listar_estoque(self) -> None:
         """
-        Percorre a fila e imprime o estoque atual em formato tabular.
+        Percorre a fila e exibe o estoque AGRUPADO POR PRODUTO.
+        Cada produto lista todos os seus lotes com a data de validade individual.
         """
         lotes = self.__fila_estoque.listar()
 
@@ -263,58 +324,92 @@ class GerenciadorEstoque:
             print("\n  📦 Estoque vazio.")
             return
 
-        print("\n" + "=" * 70)
-        print("  📦  ESTOQUE ATUAL — ORDEM FIFO (mais antigo primeiro)")
-        print("=" * 70)
+        # Coleta nomes únicos preservando a ordem de inserção (sem dict/set)
+        nomes_unicos = []
+        for lote in lotes:
+            if lote.nome not in nomes_unicos:
+                nomes_unicos.append(lote.nome)
 
-        for i, lote in enumerate(lotes, start=1):
-            prefixo = "  [VENCIDO] " if lote.esta_vencido() else f"  {i:>3}. "
-            print(f"{prefixo}{lote}")
+        print("\n" + "=" * 68)
+        print("  📦  ESTOQUE ATUAL — AGRUPADO POR PRODUTO  (FIFO por lote)")
+        print("=" * 68)
 
-        print("=" * 70)
-        print(f"  Total de lotes na fila: {self.__fila_estoque.tamanho}")
+        for nome in nomes_unicos:
+            lotes_produto = [l for l in lotes if l.nome == nome]
+            total_unidades = sum(l.quantidade for l in lotes_produto)
+            tem_vencido = any(l.esta_vencido() for l in lotes_produto)
+            aviso = "  ⚠️  POSSUI LOTE VENCIDO" if tem_vencido else ""
 
-    def relatorio_consumo(self) -> None:
+            print(f"\n  📦 {nome:<24}  Total: {total_unidades} unidade(s){aviso}")
+            print(f"     {'Lote':>4}  {'Validade':<12}  {'Qtd':>5}  "
+                  f"{'Venda':>9}  Situação")
+            print("     " + "─" * 52)
+
+            for i, lote in enumerate(lotes_produto, start=1):
+                dias = lote.dias_para_vencer()
+                if lote.esta_vencido():
+                    situacao = "VENCIDO ⚠️"
+                elif dias <= 7:
+                    situacao = f"vence em {dias}d ⚠️"
+                else:
+                    situacao = f"vence em {dias}d"
+                print(
+                    f"     {i:>4}.  "
+                    f"{lote.validade.strftime('%d/%m/%Y'):<12}  "
+                    f"{lote.quantidade:>5}  "
+                    f"R${lote.preco_venda:>7.2f}  "
+                    f"{situacao}"
+                )
+
+        print("\n" + "=" * 68)
+        print(
+            f"  Produtos distintos: {len(nomes_unicos):>3} | "
+            f"Lotes na fila: {self.__fila_estoque.tamanho:>3}"
+        )
+
+    def consultar_produto(self, nome: str) -> None:
         """
-        Percorre a fila e exibe um relatório de produtos disponíveis,
-        com margem de lucro calculada por lote.
+        Exibe detalhes completos de todos os lotes de um produto específico,
+        com data de validade, quantidades e preços individuais por lote.
+
+        Parâmetros:
+            nome : nome do produto a ser consultado.
         """
-        lotes = self.__fila_estoque.listar()
+        nome_normalizado = nome.strip().title()
+        lotes = [l for l in self.__fila_estoque.listar() if l.nome == nome_normalizado]
 
         if not lotes:
-            print("\n  📦 Nenhum produto em estoque para relatório.")
+            print(f"\n  ❌ Produto '{nome_normalizado}' não encontrado no estoque.")
             return
 
-        print("\n" + "=" * 70)
-        print("  📊  RELATÓRIO DE CONSUMO / MARGEM DE LUCRO")
+        total_unidades = sum(l.quantidade for l in lotes)
+
+        print(f"\n" + "=" * 70)
+        print(f"  🔍  PRODUTO: {nome_normalizado}")
         print("=" * 70)
-        print(f"  {'Produto':<20} {'Compra':>8} {'Venda':>8} {'Margem':>8} "
-              f"{'Qtd':>5} {'Dias p/ Vencer':>14}")
-        print("-" * 70)
+        print(f"  Lotes em estoque: {len(lotes)} | Total de unidades: {total_unidades}")
+        print()
+        print(f"  {'Lote':>4}  {'Validade':<12}  {'Qtd':>5}  "
+              f"{'Custo':>9}  {'Venda':>9}  {'Margem':>8}  Situação")
+        print("  " + "─" * 67)
 
-        total_investido = 0.0
-        total_receita_potencial = 0.0
-
-        atual_lotes = self.__fila_estoque.listar()  # visão temporária
-        for lote in atual_lotes:
+        for i, lote in enumerate(lotes, start=1):
+            dias   = lote.dias_para_vencer()
             margem = lote.preco_venda - lote.preco_compra
-            dias = lote.dias_para_vencer()
-            alerta = " ⚠️" if lote.esta_vencido() else (" !" if dias <= 7 else "")
+            if lote.esta_vencido():
+                situacao = "VENCIDO ⚠️"
+            elif dias <= 7:
+                situacao = f"vence em {dias}d ⚠️"
+            else:
+                situacao = f"vence em {dias}d"
             print(
-                f"  {lote.nome:<20} "
-                f"R${lote.preco_compra:>6.2f} "
-                f"R${lote.preco_venda:>6.2f} "
-                f"R${margem:>6.2f} "
-                f"{lote.quantidade:>5} "
-                f"{dias:>10} dias{alerta}"
+                f"  {i:>4}.  "
+                f"{lote.validade.strftime('%d/%m/%Y'):<12}  "
+                f"{lote.quantidade:>5}  "
+                f"R${lote.preco_compra:>7.2f}  "
+                f"R${lote.preco_venda:>7.2f}  "
+                f"R${margem:>6.2f}  "
+                f"{situacao}"
             )
-            total_investido += lote.preco_compra * lote.quantidade
-            total_receita_potencial += lote.preco_venda * lote.quantidade
 
-        print("-" * 70)
-        print(f"  {'TOTAIS':<20} {'':>8} {'':>8} {'':>8} "
-              f"{'':>5} {'':>14}")
-        print(f"  Investimento total : R${total_investido:.2f}")
-        print(f"  Receita potencial  : R${total_receita_potencial:.2f}")
-        print(f"  Lucro potencial    : R${total_receita_potencial - total_investido:.2f}")
-        print("=" * 70)
+        print("  " + "=" * 70)
